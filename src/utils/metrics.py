@@ -99,10 +99,17 @@ class SegmentationMetrics:
         # Flood-specific F1 (class 1 only) — the metric that matters operationally.
         # Macro F1 can be misleading when a dominant non-flood class inflates the average.
         flood_f1 = float(f1[1]) if self.n_classes > 1 else float(macro_f1)
+        # Flood-specific precision/recall (class 1 only). These are the correct
+        # components of flood_f1 — NOT the macro averages. (macro_* mix in the
+        # non-flood class and are the wrong thing to log as "flood precision".)
+        flood_precision = float(precision[1]) if self.n_classes > 1 else float(macro_precision)
+        flood_recall    = float(recall[1])    if self.n_classes > 1 else float(macro_recall)
 
         return {
             "macro_f1": float(macro_f1),
             "flood_f1": flood_f1,           # class 1 F1 only — use this for model selection
+            "flood_precision": flood_precision,  # class 1 precision only
+            "flood_recall": flood_recall,        # class 1 recall only
             "macro_iou": float(macro_iou),
             "macro_precision": float(macro_precision),
             "macro_recall": float(macro_recall),

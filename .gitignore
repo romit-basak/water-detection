@@ -17,7 +17,9 @@ wheels/
 # ---------------------------------------------------------------------------
 # Large data files (118G+): SAR/optical GeoTIFFs, precomputed chips, rasters
 # ---------------------------------------------------------------------------
-data/
+# NOTE: anchored to repo root so it does NOT also ignore src/data/ (the loader
+# package). An unanchored `data/` silently excluded src/data/ from the repo.
+/data/
 *.npy
 *.tif
 *.tiff
