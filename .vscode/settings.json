@@ -1,0 +1,84 @@
+{
+    // ── Python & environment ─────────────────────────────────────────────────
+    "python.defaultInterpreterPath": "${workspaceFolder}/.venv/bin/python",
+    "python.terminal.activateEnvironment": true,
+    "python.analysis.typeCheckingMode": "basic",
+    "python.analysis.autoImportCompletions": true,
+    "python.analysis.indexing": true,
+
+    // ── Formatting & linting (Ruff) ──────────────────────────────────────────
+    "[python]": {
+        "editor.defaultFormatter": "charliermarsh.ruff",
+        "editor.formatOnSave": true,
+        "editor.codeActionsOnSave": {
+            "source.fixAll.ruff": "explicit",
+            "source.organizeImports.ruff": "explicit"
+        }
+    },
+
+    // ── Jupyter notebooks ────────────────────────────────────────────────────
+    "jupyter.notebookFileRoot": "${workspaceFolder}",
+    "jupyter.interactiveWindow.creationMode": "perFile",
+    "notebook.formatOnSave.enabled": true,
+    "notebook.output.scrolling": true,
+    "notebook.output.textLineLimit": 100,
+    // Use the workspace venv kernel automatically
+    "jupyter.kernelPickerType": "all",
+    "jupyter.preferredKernelId": "${workspaceFolder}/.venv/bin/python",
+
+    // ── Apple Silicon / MPS ──────────────────────────────────────────────────
+    // Adds PYTORCH_ENABLE_MPS_FALLBACK=1 to every integrated terminal session
+    // so ops not yet implemented on MPS fall back to CPU silently instead of crashing.
+    "terminal.integrated.env.osx": {
+        "PYTORCH_ENABLE_MPS_FALLBACK": "1",
+        "PYTORCH_MPS_HIGH_WATERMARK_RATIO": "0.7"
+    },
+
+    // ── Editor comfort ───────────────────────────────────────────────────────
+    "editor.rulers": [100],
+    "editor.tabSize": 4,
+    "editor.insertSpaces": true,
+    "editor.renderWhitespace": "boundary",
+    "editor.bracketPairColorization.enabled": true,
+    "editor.guides.bracketPairs": "active",
+    "editor.suggest.preview": true,
+    "editor.inlineSuggest.enabled": true,
+
+    // ── Files ────────────────────────────────────────────────────────────────
+    "files.trimTrailingWhitespace": true,
+    "files.insertFinalNewline": true,
+    // Exclude large data dirs from file watcher (prevents VSCode from indexing 61GB)
+    "files.watcherExclude": {
+        "**/data/urban_sar_floods/**": true,
+        "**/.venv/**": true,
+        "**/runs/**": true
+    },
+    "files.exclude": {
+        "**/.venv": true,
+        "**/__pycache__": true,
+        "**/*.pyc": true,
+        "**/final_proposal.aux": true,
+        "**/final_proposal.log": true,
+        "**/final_proposal.out": true,
+        "**/*.egg-info": true
+    },
+    // Don't search inside the data directory or venv
+    "search.exclude": {
+        "**/data/urban_sar_floods/**": true,
+        "**/.venv/**": true,
+        "**/runs/**": true,
+        "**/uv.lock": true
+    },
+
+    // ── Git ──────────────────────────────────────────────────────────────────
+    "git.ignoreLimitWarning": true,
+    "git.autofetch": true,
+
+    // ── GeoTIFF / binary file associations ───────────────────────────────────
+    "files.associations": {
+        "*.tif": "binary",
+        "*.tiff": "binary",
+        "*.geojson": "json",
+        "*.js": "javascript"   // GEE scripts
+    }
+}

@@ -1,0 +1,51 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# OS / editor cruft
+.DS_Store
+.Rhistory
+.ipynb_checkpoints/
+
+# ---------------------------------------------------------------------------
+# Large data files (118G+): SAR/optical GeoTIFFs, precomputed chips, rasters
+# ---------------------------------------------------------------------------
+data/
+*.npy
+*.tif
+*.tiff
+
+# ---------------------------------------------------------------------------
+# Model checkpoints / training artifacts (~8G of .pt)
+# runs/ keeps its metric logs (.csv/.txt/.png) but not the weights.
+# ---------------------------------------------------------------------------
+*.pt
+*.pth
+*.ckpt
+runs/**/*.pt
+
+# ---------------------------------------------------------------------------
+# LaTeX build output & intermediates (keep .tex source only; PDFs are
+# reproducible binary artifacts that bloat history — git can't delta them)
+# ---------------------------------------------------------------------------
+*.pdf
+*.aux
+*.log
+*.out
+*.fls
+*.fdb_latexmk
+*.synctex.gz
+*.bbl
+*.blg
+*.toc
+*.lof
+*.lot
+
+CLAUDE.md

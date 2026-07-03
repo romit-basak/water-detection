@@ -1,0 +1,151 @@
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{booktabs}
+\usepackage{hyperref}
+\usepackage{parskip}
+\usepackage{enumitem}
+\usepackage{float}
+
+\title{\textbf{Final Project Proposal:\\
+Urban Flood Detection via Cross-Modal Weak Supervision}}
+\author{Romit Basak}
+\date{CS5330 Pattern Recognition and Computer Vision --- Spring 2026}
+
+\begin{document}
+\maketitle
+
+% ============================================================================
+\section*{Problem Statement}
+% ============================================================================
+
+Urban flood detection from satellite imagery is an open problem. Optical satellites
+produce high-quality water maps but fail during cloud cover --- precisely when floods
+are most likely to occur. Synthetic Aperture Radar (SAR) penetrates clouds but produces
+complex backscatter signals that are difficult to interpret in urban areas, where radar
+pulses bounce off building walls rather than reflecting directly from water surfaces
+(the double-bounce effect).
+
+This project builds a \textbf{generalizable} deep learning pipeline for urban flood
+detection that can be deployed in any city worldwide. The core idea: use
+\textbf{clear-sky optical imagery as pseudo-ground-truth} to train a SAR-based flood
+detector. When a flood event coincides with clear skies, optical water indices (NDWI)
+can generate pixel-precise flood labels automatically. These labels train a U-Net
+segmentation model on co-registered SAR imagery. The trained SAR model can subsequently
+detect floods under cloudy conditions where optical sensors fail entirely --- making it
+useful for any urban region regardless of local cloud climatology.
+
+% ============================================================================
+\section*{Data}
+% ============================================================================
+
+\textbf{Primary satellite data} will be accessed via Google Earth Engine (GEE), which
+provides free, analysis-ready access to the full Sentinel-1 SAR and Sentinel-2 optical
+archives:
+
+\begin{itemize}[noitemsep]
+    \item \textbf{Sentinel-1 SAR} (\texttt{COPERNICUS/S1\_GRD}): 10m resolution,
+    C-band, VV and VH polarizations. Cloud-penetrating. Used as model input.
+    \item \textbf{Sentinel-2 optical} (\texttt{COPERNICUS/S2\_SR\_HARMONIZED}):
+    10m resolution, multi-spectral. Used only during clear-sky periods to generate
+    NDWI-based pseudo-labels. Not available at inference time.
+    \item \textbf{Landsat 8/9} (\texttt{LANDSAT/LC08/C02/T1\_L2}): 30m fallback
+    when Sentinel-2 coverage is insufficient. Downsampled to match SAR resolution.
+\end{itemize}
+
+\textbf{Public benchmark datasets} will be used for pre-training and evaluation:
+
+\begin{itemize}[noitemsep]
+    \item \textbf{UrbanSARFloods} (Zhao et al., CVPR Workshop 2024): 8,879 chips
+    across 18 flood events, Sentinel-1 intensity and InSAR coherence, urban focus.
+    Primary benchmark and source of pre-labeled training chips.
+    \item \textbf{Sen1Floods11} (Bonafilia et al., CVPR Workshop 2020): 4,831
+    hand-labeled chips across 11 events, used for initial pretraining.
+\end{itemize}
+
+\textbf{Pseudo-label generation pipeline}: For $\sim$27 SAR--optical image pairs spanning 3 major flood events across 8 city regions (Houston Harvey 2017, Valencia Spain 2024, Brisbane 2022), the pipeline
+finds coincident SAR and clear optical acquisitions (within 48 hours), computes NDWI
+from the optical image, subtracts a per-city dry-season median baseline to isolate
+anomalous water, and generates confidence-weighted binary flood masks. This yields
+additional training pairs beyond what the public benchmarks provide, with controllable
+geographic diversity.
+
+% ============================================================================
+\section*{Model}
+% ============================================================================
+
+The core model is a \textbf{U-Net} segmentation architecture, chosen for its strong
+track record on satellite imagery and its encoder-decoder structure that preserves
+spatial resolution --- essential for 10m-pixel flood boundary delineation.
+
+\textbf{Core input channels} (per image chip, $256 \times 256$ pixels):
+\begin{itemize}[noitemsep]
+    \item VV backscatter (Sentinel-1)
+    \item VH backscatter (Sentinel-1)
+    \item Local variance (per-channel $5\times5$ filter, discriminates radar shadow from open water via speckle texture)
+    \item Incidence angle (per-pixel, from SAR metadata)
+    \item ERA5 precipitation accumulation (72-hour pre-event, optional conditioning channel)
+\end{itemize}
+
+\textbf{Training strategy}:
+\begin{enumerate}[noitemsep]
+    \item Pre-train on Sen1Floods11 (large, diverse, hand-labeled).
+    \item Fine-tune on UrbanSARFloods + pseudo-labels from 2--3 collected flood events.
+    \item Evaluate on held-out cities from UrbanSARFloods to test generalizability.
+\end{enumerate}
+
+\textbf{Loss function}: Weighted combination of binary cross-entropy and IoU loss,
+with confidence weighting from the pseudo-label pipeline to down-weight uncertain
+pixels near flood boundaries.
+
+\textbf{Baselines}: Otsu thresholding and Random Forest on raw backscatter, replicating
+the Al Mehedi et al.\ (2025) experimental setup for direct comparison. Primary
+evaluation metric: F1-score on the flood class (accuracy is misleading due to severe
+class imbalance).
+
+% ============================================================================
+\section*{Planned Extensions (Post-Submission)}
+% ============================================================================
+
+The following components are scoped out of the April 22 submission due to time
+constraints, but are planned extensions for continued thesis work:
+
+\begin{itemize}[noitemsep]
+    \item \textbf{Radar shadow channel}: Building footprints (Google Open Buildings)
+    combined with SAR geometry to compute per-pixel radar shadow probability, helping
+    the model distinguish shadow from water. Requires non-trivial geometric computation.
+    \item \textbf{L-band generalization}: Extending the pipeline to ALOS-2 L-band SAR
+    to test whether the model transfers across radar wavelengths.
+    \item \textbf{Seasonal baseline expansion}: Scaling pseudo-label generation to
+    full wet seasons (hundreds of training pairs per city) rather than 2--3 events.
+    \item \textbf{Kolkata deployment}: Applying the trained generalizable model to
+    Kolkata monsoon flood detection, connecting this work to ongoing thesis research
+    with Prof.\ Auroop Ganguly.
+\end{itemize}
+
+% ============================================================================
+\section*{Compute}
+% ============================================================================
+
+\textbf{Data preprocessing} will run entirely on \textbf{Google Earth Engine} (free,
+cloud-based), handling the petabyte-scale satellite archive without local compute.
+GEE exports processed image chips directly to Google Drive.
+
+\textbf{Model training} will use \textbf{Google Colab Pro} (available via university
+access), which provides A100 GPU instances. U-Net at $256 \times 256$ input with
+$\sim$30M parameters trains in approximately 2--4 hours per run. Total estimated GPU
+time across all experiments: 20--30 hours.
+
+The Khoury College GPU cluster (RTX 3090, SLURM) is available as a fallback.
+No paid cloud services are required beyond existing university resources.
+
+% ============================================================================
+\section*{Connection to CS5330}
+% ============================================================================
+
+This project applies core course concepts directly to a real remote sensing problem:
+semantic segmentation (U-Net), transfer learning (ImageNet $\to$ SAR domain),
+cross-modal learning (optical pseudo-labels for SAR training), and physics-based
+feature engineering. The generalizable flood detection system is a direct extension
+of the deep network recognition and transfer learning themes developed in Projects 4--5.
+
+\end{document}

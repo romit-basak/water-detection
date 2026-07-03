@@ -1,0 +1,9 @@
+Cross-city baseline (Sydney 2022):
+  macro_f1:  0.33289
+  macro_iou: 0.33244
+
+City-specific fine-tune (Sydney 2021 → 2022):
+  train chips: 33
+  best macro_f1:  0.33333
+  best epoch:     8
+  improvement:    +0.00045

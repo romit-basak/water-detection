@@ -1,0 +1,4 @@
+Cross-city baseline (Sydney 2022):
+  macro_f1:  0.33238
+  macro_iou: 0.33144
+

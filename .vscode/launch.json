@@ -1,0 +1,56 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Train (baseline)",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "src.train",
+            "args": [
+                "--out_dir", "runs/baseline",
+                "--epochs", "50",
+                "--batch_size", "8"
+            ],
+            "env": {
+                "PYTORCH_ENABLE_MPS_FALLBACK": "1",
+                "PYTORCH_MPS_HIGH_WATERMARK_RATIO": "0.7"
+            },
+            "cwd": "${workspaceFolder}",
+            "console": "integratedTerminal",
+            "justMyCode": false
+        },
+        {
+            "name": "Train (smoke test, 2 epochs)",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "src.train",
+            "args": [
+                "--out_dir", "runs/smoke",
+                "--epochs", "2",
+                "--batch_size", "2",
+                "--num_workers", "0"
+            ],
+            "env": {
+                "PYTORCH_ENABLE_MPS_FALLBACK": "1"
+            },
+            "cwd": "${workspaceFolder}",
+            "console": "integratedTerminal",
+            "justMyCode": false
+        },
+        {
+            "name": "Evaluate checkpoint",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "src.evaluate",
+            "args": [
+                "--checkpoint", "runs/baseline/best_model.pt"
+            ],
+            "env": {
+                "PYTORCH_ENABLE_MPS_FALLBACK": "1"
+            },
+            "cwd": "${workspaceFolder}",
+            "console": "integratedTerminal",
+            "justMyCode": false
+        }
+    ]
+}

@@ -1,0 +1,5 @@
+        # Extract per-class precision/recall from confusion matrix
+        prec = float(test_r['per_class_f1'][1])   # placeholder: use flood F1 components
+        # Correctly: derive flood precision/recall from per-class arrays
+        prec = test_r.get('macro_precision', float('nan'))
+        rec  = test_r.get('macro_recall',    float('nan'))

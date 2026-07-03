@@ -1,0 +1,32 @@
+[project]
+name = "water-detection"
+version = "0.1.0"
+description = "SAR-based urban flood detection with shadow-aware priors and cross-modal pseudo-labels"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    # Geospatial
+    "earthengine-api>=1.7.4",
+    "rasterio>=1.3",
+    "pyproj>=3.6",
+    "shapely>=2.0",
+    # Data science
+    "numpy>=1.26",
+    "pandas>=2.3.3",
+    "scipy>=1.13",
+    # Deep learning (torch installed separately — see README)
+    "segmentation-models-pytorch>=0.3.4",
+    "albumentations>=1.4",
+    # Visualization & notebooks
+    "matplotlib>=3.9",
+    "ipykernel>=7.1.0",
+    "tqdm>=4.66",
+    # Metrics
+    "scikit-learn>=1.5",
+]
+
+[tool.uv]
+# PyTorch must be installed separately with the right CUDA/CPU index:
+# uv pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
+# or for CPU-only:
+# uv pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu

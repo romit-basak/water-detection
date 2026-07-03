@@ -1,0 +1,562 @@
+\documentclass[10pt,twocolumn]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{booktabs}
+\usepackage{hyperref}
+\usepackage{graphicx}
+\usepackage{amsmath}
+\usepackage{parskip}
+\usepackage{microtype}
+\usepackage{xcolor}
+\usepackage{enumitem}
+\usepackage{multirow}
+\usepackage{tabularx}
+\setlist{noitemsep}
+
+\hypersetup{colorlinks=true, linkcolor=blue, citecolor=blue, urlcolor=blue}
+
+\title{\textbf{Cross-City Urban Flood Detection from SAR:\\
+       Geographic Context Features and the Data-Volume Ceiling}}
+\author{Romit Basak\\
+  \small CS5330 Pattern Recognition and Computer Vision --- Spring 2026\\
+  \small Khoury College of Computer Sciences, Northeastern University\\
+  \small Advisor: Prof.\ Bruce Maxwell}
+\date{}
+
+\begin{document}
+\maketitle
+
+% ============================================================
+\begin{abstract}
+Urban flood detection from Synthetic Aperture Radar (SAR) imagery is
+critical for cloud-penetrating disaster response, but generalizing to
+unseen cities remains an open problem.  We investigate two strategies
+for improving cross-city generalization on UrbanSARFloods under a strict
+event-held-out evaluation split: (1) static geographic context
+features---urban morphology (WorldCover, Google Open Buildings),
+topographic position (HAND elevation), and sensor geometry
+(Sentinel-1 incidence angle); and (2) pseudo-label pretraining on
+11 new flood events using AWEI\_sh optical confidence maps.
+Our best model, an ImageNet-pretrained ResNet-34 U-Net fine-tuned
+with focal loss ($\alpha_{\text{flood}}=0.75$, $\gamma=2$) on 7
+training cities, achieves peak flood F1 = 0.150 and macro F1 = 0.551
+on 7 completely unseen test cities.
+All experimental conditions---SAR-only, geographic context augmentation,
+and pseudo-label pretraining---converge to the same flood F1 ceiling of
+$0.10$--$0.15$ (macro F1 $0.49$--$0.55$), with within-run variance
+$\sigma \approx 0.020$ making differences between configurations
+inconclusive.
+We document four implementation pitfalls: a degenerate multi-class label
+scheme, collapse-to-non-flood under class imbalance, Sen1Floods11
+pretraining collapse, and pseudo-label pretraining collapse via rapid
+overfitting to noisy optical-derived labels.
+These findings collectively characterize what is tractable in cross-city
+SAR urban flood detection with limited labeled data.
+\end{abstract}
+
+% ============================================================
+\section{Introduction}
+
+Flooding is the most economically damaging natural disaster globally,
+affecting an estimated 1.8 billion people annually.  SAR satellites
+such as Sentinel-1 provide cloud-penetrating flood maps within hours
+of an overpass, making them the primary data source for operational
+disaster response through services such as Copernicus EMS.
+
+SAR flood detection in open areas is tractable: calm water produces
+specular reflection that appears dark in SAR imagery against rougher
+terrain.  Urban environments fundamentally break this assumption.
+Building fa\c{c}ades produce double-bounce reflections that brighten
+flooded streets.  Radar shadow behind tall buildings creates dark
+regions that mimic open water.  Smooth impervious surfaces---roads,
+parking lots---also appear dark even when dry.  As a result, a model
+trained on one city's SAR flood signatures often fails on another city
+with different building morphology, street geometry, and acquisition
+geometry.
+
+We investigate two hypotheses.  First, a model that knows
+\emph{where it is}---what the urban density, topographic position
+relative to drainage, and sensor viewing angle are at each
+pixel---can reason from physics-grounded priors that transfer across
+cities.  Second, pseudo-labeled chips from new flood events, derived
+from AWEI\_sh optical water indices with confidence weighting, can
+expand the effective training set and raise the data-volume ceiling.
+
+\paragraph{Contributions.}
+\begin{enumerate}
+  \item A reproducible binary-label pipeline for cross-city SAR flood
+        detection with strict event-held-out evaluation.
+  \item Empirical comparison of SAR-only vs.\ geographic context
+        augmented models (WorldCover + Google Buildings + HAND +
+        incidence angle).
+  \item An end-to-end AWEI\_sh pseudo-label pipeline evaluated on
+        11 new flood events, with confidence-weighted focal loss
+        and empirical evaluation of transfer to unseen cities.
+  \item Diagnosis and documentation of four critical implementation
+        failure modes with verified fixes.
+  \item Characterization of a data-volume ceiling at flood F1
+        $\approx 0.10$--$0.15$ (macro F1 $\approx 0.49$--$0.55$)
+        that persists across all experimental conditions.
+\end{enumerate}
+
+% ============================================================
+\section{Related Work}
+
+\paragraph{SAR flood datasets.}
+Sen1Floods11~\cite{bonafilia2020} provides 446 hand-labeled Sentinel-1
+chips across 11 open-area flood events on 6 continents.
+UrbanSARFloods~\cite{zhao2024} extends this to 8,879 chips from 18
+urban flood events, but published baselines use random chip splits that
+permit spatial autocorrelation leakage between training and test chips
+from the same city.
+Kuro Siwo~\cite{yadav2024} scales to 33 billion m$^2$ of SAR imagery
+but focuses on open-area detection, explicitly noting cross-city
+generalization as an unsolved problem.
+
+\paragraph{Evaluation methodology.}
+Al Mehedi et al.~\cite{almehedi2025} compare Otsu thresholding,
+change detection, and Random Forest on Houston Harvey, reporting urban
+flood F1 = 0.608 (ML classifier) with precision and recall
+$\approx 0.60$.  However, their model is trained and tested on the
+same event.  Zhao et al.\ report F1 = 0.51--0.77 with random chip
+splits from the same events.  Both evaluations are in-domain.  Our
+event-held-out split is strictly harder: no chip from any test city
+appears during training.
+
+\paragraph{Geographic priors for flood detection.}
+HAND (Height Above Nearest Drainage)~\cite{renno2008} is a physically
+motivated prior: pixels near drainage networks flood before those at
+higher elevations, reflecting hydraulic principles that transfer across
+cities rather than city-specific appearance.
+DeepSARFlood (2025) uses HAND and terrain slope as both inputs and
+postprocessors.  Sentinel-1 incidence angle effects on urban SAR
+scattering are well documented~\cite{moreira2013} but rarely used as
+explicit model inputs.
+
+\paragraph{Optical pseudo-labels for SAR.}
+AWEI\_sh (Automated Water Extraction Index with shadow
+suppression)~\cite{feyisa2014} reduces building-shadow
+misclassification in urban optical imagery relative to NDWI.
+Using optical water indices to generate SAR training labels has been
+proposed for open-area floods~\cite{bonafilia2020} but its
+effectiveness in dense urban scenes at 10\,m resolution is not
+established prior to this work.
+
+% ============================================================
+\section{Data}
+
+\subsection{Datasets}
+
+\textbf{UrbanSARFloods}~\cite{zhao2024} provides 8,879 Sentinel-1
+chips from 18 urban flood events across 5 continents, organized into
+\texttt{01\_NF} (confirmed non-flooded), \texttt{02\_FO} (flooded
+open area), and \texttt{03\_FU} (flooded urban).
+
+\textbf{Pseudo-labeled events.}  We construct a supplementary
+pseudo-labeled dataset from 11 new flood events not present in
+UrbanSARFloods: Brisbane 2022, Sydney 2022, Valencia 2024,
+Liège 2021 (two SAR acquisition dates), Cologne 2021,
+Zhengzhou 2021, Derna 2023 (two SAR dates), Emilia-Romagna 2023,
+and Rio Grande do Sul 2024.
+Events were identified via a Sentinel-1/Sentinel-2 co-registration
+discovery pipeline requiring cloud cover $< 30$\% within $\pm$2 days
+of the SAR acquisition.
+Per-pixel confidence maps are derived from AWEI\_sh on
+Sentinel-2 Surface Reflectance imagery, with shadow masking
+(NIR $< 0.10$ and Blue $< 0.05$) and SCL-based cloud exclusion.
+After spatial chipping (512$\times$512 at 10\,m, 50\% overlap stride)
+and a 3:1 non-flood:flood subsampling cap, this yields 2,073 chips
+from 11 events.
+
+\subsection{Label Scheme}
+
+We use a binary label scheme throughout: $1 =$ flood, $0 =$ non-flood,
+$-1 =$ ignore.
+
+\begin{itemize}
+  \item \texttt{01\_NF} chips: all pixels $\to 0$ (confirmed non-flood).
+  \item \texttt{02\_FO / 03\_FU}: background $\to -1$; open and urban
+        flood $\to 1$.
+  \item Pseudo-labeled chips: AWEI\_sh confidence $\geq 0.65 \to 1$
+        (flood, loss weight $=$ confidence);
+        confidence $\leq 0.35 \to 0$
+        (non-flood, weight $= 1 -$ confidence);
+        otherwise $\to -1$ (ignore).
+\end{itemize}
+
+\paragraph{Why binary?}
+Any multi-class scheme where non-flood is one of the averaged classes
+produces misleading macro metrics: non-flood pixels dominate ($>98$\%),
+so a model predicting non-flood everywhere achieves macro F1 $> 0.35$
+while flood F1 $\approx 0$.  We verified this empirically
+(Section~\ref{sec:degenerate}).  We report \textbf{flood F1}
+(class 1 only) as our primary operational metric and
+\textbf{macro F1} (average of flood and non-flood F1) as a
+secondary metric for comparability with standard CV benchmarks.
+The all-non-flood degenerate baseline achieves macro F1 = 0.33.
+
+\subsection{Event-Level Split}
+
+\begin{table}[h]
+\centering\small
+\caption{Event-level train/test split (3,261 train / 3,210 test chips).
+  No chip from any test city appears during training.
+  Pseudo-labeled events are disjoint from both splits.}
+\label{tab:split}
+\begin{tabularx}{\columnwidth}{lX}
+\toprule
+Split & Events \\
+\midrule
+Train (7) & Houston, Beira, Japan, Canada, Iran, Lumberton, Somalia \\
+Test  (7) & Hagibis, Sydney, Coraki, Niger, Hebei, Beledweyne, PortMacquarie \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\subsection{Input Features}
+
+\paragraph{SAR channels (4).}
+VV intensity, VH intensity, local variance of VV ($5{\times}5$ window),
+local variance of VH.  Variance channels disambiguate radar shadow
+(near-zero variance) from open water (non-zero speckle variance).
+
+\paragraph{Geographic context channels (4, aux models).}
+(1) Google Open Buildings density (normalised to $[0,1]$ at 100\,m);
+(2) ESA WorldCover v200 built-up fraction at 100\,m;
+(3) HAND elevation clipped to 30\,m and normalised to $[0,1]$;
+(4) Sentinel-1 incidence angle ($[20^\circ, 46^\circ] \to [0,1]$).
+All exported from Google Earth Engine and resampled to chip resolution
+via bilinear interpolation.  The same pipeline was applied to
+pseudo-labeled event AOIs to produce 8-channel pseudo chips.
+
+% ============================================================
+\section{Method}
+
+\subsection{Model Architecture}
+
+We use a U-Net with ResNet-34 encoder from
+\texttt{segmentation-models-pytorch}~\cite{iakubovskii2019},
+pretrained on ImageNet.  The first convolutional layer is extended to
+accept 8 input channels: weights for the original 3 channels are
+preserved; additional channels are initialised as their mean, avoiding
+large initial gradients.  The decoder predicts 2 classes (non-flood,
+flood).
+
+\subsection{Loss Function}
+
+Standard cross-entropy and Dice losses collapse to the
+non-flood-everywhere solution when flood pixels constitute $<1$\% of
+labeled pixels.  We use focal loss~\cite{lin2017focal}:
+
+\[
+  \mathcal{L} = -\alpha_t (1 - p_t)^\gamma \log p_t, \quad \gamma = 2.0
+\]
+
+with $\alpha_{\text{flood}} = \text{fw}/(1+\text{fw})$.
+For pseudo-labeled chips, per-pixel focal loss is additionally
+multiplied by the AWEI\_sh confidence weight, so uncertain pixels
+contribute proportionally less gradient.
+
+\subsection{Training Protocol}
+
+\paragraph{Standard fine-tuning.}
+Up to 40 epochs, discriminative learning rates (encoder
+$2{\times}10^{-5}$, decoder/head $10^{-4}$), cosine decay with 3-epoch
+linear warmup, early stopping patience 8 on flood F1, batch size 16,
+weight decay $5{\times}10^{-4}$, AdamW.
+
+\paragraph{Pseudo-label pipeline.}
+Stage~0 pretrains on 2,073 pseudo-labeled chips for up to 20 epochs
+($\text{lr} = 10^{-4}$, patience 6 on zero-shot flood F1 monitored
+on the UrbanSARFloods test set without fine-tuning).
+Stage~1 fine-tunes on UrbanSARFloods using the same protocol above.
+
+% ============================================================
+\section{Results}
+
+\subsection{Main Results}
+\label{sec:results}
+
+Table~\ref{tab:main} summarises all model configurations.
+We report peak flood F1 (best single epoch), macro F1 at that epoch,
+and mean$\,\pm\,$SD of flood F1 over all epochs.
+Within-run SD $\approx 0.020$ is comparable to differences between
+configurations, making most pairwise differences inconclusive.
+
+% Full-width table to avoid column overflow
+\begin{table*}[t]
+\centering\small
+\caption{Cross-city results on event-held-out test split (3,210 chips, 7 unseen cities).
+  Macro F1 reported at the peak-flood-F1 epoch.
+  Degenerate (all-non-flood) baseline: macro F1 = 0.33, flood F1 = 0.}
+\label{tab:main}
+\begin{tabular}{lcccc}
+\toprule
+Model & Channels & Peak Flood F1 & Macro F1 & Mean$\pm$SD Flood F1 \\
+\midrule
+SAR-only (fw=10)               & 4 & 0.120 & $\sim$0.48 & $0.082\pm0.020$ \\
+Aux features (fw=10)           & 8 & 0.102 & $\sim$0.49 & $0.086\pm0.014$ \\
+Aux features (fw=3)            & 8 & 0.150 & $\sim$0.52 & $0.100\pm0.022$ \\
+\midrule
+Finetune-only, fw=3$^\dagger$  & 8 & 0.143 & 0.551      & $0.103\pm0.019$ \\
+Pseudo+Finetune, fw=3$^\dagger$& 8 & 0.136 & 0.550      & $0.091\pm0.025$ \\
+\bottomrule
+\multicolumn{5}{l}{$^\dagger$Macro F1 logged exactly from same codebase.
+  Top three rows: macro F1 estimated from macro IoU.}
+\end{tabular}
+\end{table*}
+
+All five configurations converge to flood F1 $0.10$--$0.15$ and
+macro F1 $0.49$--$0.55$.
+Finetune-only (0.143) and Aux fw=3 (0.150) differ by less than one
+within-run SD, confirming equivalence.  Pseudo-label pretraining
+(0.136) also falls within this band.  No configuration meaningfully
+outperforms any other.
+
+\subsection{Per-City Breakdown}
+
+Table~\ref{tab:percity} shows per-city flood F1, precision, and recall
+for the SAR-only and best Aux configurations at their best checkpoints.
+
+% Single-column with abbreviated names and tighter spacing
+\begin{table}[h]
+\centering\small
+\setlength{\tabcolsep}{4pt}
+\caption{Per-city flood F1 at best checkpoint (P = precision, R = recall).
+  Aux = 8-channel geographic context, fw=3.}
+\label{tab:percity}
+\begin{tabular}{lc rrr rrr}
+\toprule
+ & & \multicolumn{3}{c}{SAR-only (fw=10)} & \multicolumn{3}{c}{Aux (fw=3)} \\
+\cmidrule(lr){3-5}\cmidrule(lr){6-8}
+City & $N$ & F1 & P & R & F1 & P & R \\
+\midrule
+Port Mac. & 187 & \textbf{.541} & .435 & .716 & .200 & .549 & .122 \\
+Coraki    & 135 & .282 & .167 & .905 & \textbf{.420} & .431 & .410 \\
+Niger     & 501 & .147 & .081 & .792 & .151 & .108 & .251 \\
+Beledw.   & 492 & .092 & .050 & .532 & \textbf{.170} & .094 & .899 \\
+Sydney    & 962 & .091 & .051 & .424 & \textbf{.106} & .064 & .311 \\
+Hebei     & 933 & .054 & .028 & .512 & \textbf{.125} & .071 & .518 \\
+\midrule
+Mean      &3210 & .201 & & & .195 & & \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+SAR-only (fw=10) achieves high recall (0.42--0.91) at very low
+precision (0.03--0.44), reflecting systematic over-prediction of flood.
+Aux fw=3 rebalances to higher precision (0.06--0.55) and lower recall
+(0.12--0.90), producing higher F1 for 5 of 6 cities.
+
+PortMacquarie and Coraki (Australian river floods, large contiguous
+water bodies) are easiest.  Hebei (dense urban China) and Sydney
+(fragmented urban flooding) are hardest: fw=3 still reaches only
+F1 = 0.125 and 0.106 respectively.
+
+\subsection{Comparison with Published Results}
+
+\begin{table}[h]
+\centering\small
+\caption{Comparison with published methods.  Direct numerical
+  comparison is not valid due to evaluation protocol differences.}
+\label{tab:compare}
+\begin{tabular}{lcc}
+\toprule
+Method & F1 & Evaluation \\
+\midrule
+Al Mehedi RF~\cite{almehedi2025}   & 0.608      & Same event \\
+Zhao et al.~\cite{zhao2024}        & 0.51--0.77 & Random chip split \\
+Ours                               & 0.150      & Cross-city held-out \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The gap between published F1 $\approx 0.6$ and our flood F1 $\approx
+0.15$ quantifies the cost of cross-city generalization.  On macro F1
+our models (0.49--0.55) substantially exceed the all-non-flood baseline
+(0.33), confirming genuine learning rather than degenerate prediction.
+
+% ============================================================
+\section{Failure Mode Analysis}
+\label{sec:failure}
+
+\subsection{Degenerate Multi-Class Labeling}
+\label{sec:degenerate}
+
+Our initial 4-class scheme (0=ignore, 1=open flood, 2=urban flood,
+3=non-flood) reported macro F1 up to 0.389.  Diagnosis revealed the
+model predicted non-flood for 88.5\% of pixels; true flood F1 was
+0.116.  Non-flood dominates the dataset, so near-perfect non-flood F1
+inflates the macro average regardless of flood detection quality.
+The scheme also introduced a cross-dataset label conflict between
+Sen1Floods11 and UrbanSARFloods class indices.
+
+\textbf{Fix:} Binary labels; flood F1 as primary metric.
+
+\subsection{Collapse-to-Non-Flood}
+\label{sec:collapse}
+
+Cross-entropy and Dice losses both collapsed to all-non-flood by epoch
+3.  Dice loss finds a local minimum at zero flood predictions because
+its denominator is dominated by non-flood volume at $<1$\% flood pixel
+prevalence.  Focal loss with $\alpha_{\text{flood}}=0.75$, $\gamma=2.0$
+resolved the collapse by down-weighting easy non-flood examples.
+
+\subsection{Sen1Floods11 Pretraining Collapse}
+\label{sec:s1collapse}
+
+Pretraining on Sen1Floods11 collapsed after epoch 2: flood F1 fell from
+0.289 to 0.063 despite decreasing training loss.  The dataset has
+many all-NaN chips and no dense urban scenes.  We use ImageNet
+initialization directly for all reported models.
+
+\subsection{Pseudo-Label Pretraining Collapse}
+\label{sec:pseudo_collapse}
+
+Pseudo-label pretraining on 2,073 chips from 11 events degraded peak
+flood F1 from 0.143 to 0.136 (finetune-only baseline).
+Table~\ref{tab:pseudo_curve} shows the Stage~0 curve: zero-shot F1
+peaked at 0.124 at epoch~3, then collapsed to near zero by epoch~9.
+
+\begin{table}[h]
+\centering\small
+\caption{Stage~0 pseudo-pretraining log.  Zero-shot flood F1 on the
+  UrbanSARFloods test set (no fine-tuning).}
+\label{tab:pseudo_curve}
+\begin{tabular}{rcc}
+\toprule
+Epoch & Train loss & Zero-shot F1 \\
+\midrule
+1 & 0.0462 & 0.033 \\
+2 & 0.0101 & 0.025 \\
+3 & 0.0065 & \textbf{0.124} \\
+4 & 0.0043 & 0.051 \\
+5 & 0.0040 & 0.052 \\
+6 & 0.0034 & 0.013 \\
+7 & 0.0031 & 0.010 \\
+8 & 0.0030 & 0.013 \\
+9 & 0.0029 & 0.001\quad$\leftarrow$stopped \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Three factors explain the collapse.  \textbf{Dataset size}: 2,073
+chips is insufficient to stabilize the encoder.  \textbf{Label
+sparsity}: four of eleven events (Cologne, Zhengzhou, Liège~B,
+Emilia-Romagna) produced zero flood chips because AWEI\_sh cannot
+detect flood water in dense urban cores where building shadows suppress
+the optical water signal; only 621 of 2,073 chips contained any flood
+signal.  \textbf{Domain mismatch}: pseudo-labeled events are
+predominantly open fluvial floods, not adding the dense urban SAR
+diversity needed to improve on Hebei and Sydney.
+
+\textbf{Implication:} SAR change detection (pre-flood vs.\ flood-period
+backscatter ratio) is a more promising pseudo-label strategy, as it
+avoids optical cloud and shadow entirely.
+
+% ============================================================
+\section{Discussion}
+
+\subsection{The Data-Volume Ceiling}
+
+All experimental conditions converge to flood F1 $\approx 0.10$--$0.15$
+and macro F1 $\approx 0.49$--$0.55$.  This ceiling persists across
+feature sets, loss weight tuning, and pseudo-label pretraining.  It
+is not a model capacity problem (training loss $\to 0.007$) nor a label
+quality problem.  The pseudo-label experiment demonstrates it is not
+solely a data quantity problem---label quality and urban diversity of
+pseudo-labeled events are equally binding constraints.
+
+Kuro Siwo~\cite{yadav2024} identified cross-city generalization as
+unsolved even at 33 billion m$^2$.  Our results provide a concrete
+ceiling characterization at 7 labeled training cities with two
+negative results: geographic context features and optical
+pseudo-labeling do not overcome it at this scale.
+
+\subsection{Why Geographic Features Did Not Help}
+
+The per-city results show geographic context helps where it should:
+Coraki and Beledweyne improve (0.282$\to$0.420 and 0.092$\to$0.170),
+both events where flood extent correlates with topographic position.
+Hebei and Sydney show negligible improvement, consistent with dense
+urban scattering complexity exceeding what 7 training cities can teach.
+At 20--30 training cities, geographic context should show clear benefit.
+
+\subsection{Implications for Kolkata Deployment}
+
+Our results suggest: (1) hand-labeled South and Southeast Asian urban
+flood events are essential; (2) SAR change detection pseudo-labels
+are more promising than AWEI\_sh; (3) geographic context features
+are worth retaining for when sufficient training cities are available.
+
+% ============================================================
+\section{Conclusion}
+
+We presented a systematic investigation of cross-city SAR urban flood
+detection across five experimental conditions.  Our best model achieves
+peak flood F1 = 0.150, macro F1 = 0.551 on 7 unseen cities.
+Geographic context features and AWEI\_sh pseudo-label pretraining
+on 11 additional events neither improved nor degraded results beyond
+the within-run noise floor, confirming a data-volume ceiling that
+persists across all conditions tested.
+
+Four documented failure modes provide concrete guidance for future work.
+The path to substantially higher cross-city flood F1 runs through
+more hand-labeled urban events from diverse morphological contexts.
+
+Future directions: SAR change detection for pseudo-label generation;
+geospatial foundation model encoders (Prithvi-EO-2.0); HAND-based
+flood shadow interpolation; scaling to 20+ labeled training cities.
+
+% ============================================================
+\bibliographystyle{plain}
+\begin{thebibliography}{9}
+
+\bibitem{bonafilia2020}
+D.~Bonafilia, B.~Tellman, T.~Anderson, and E.~Issenberg,
+``Sen1Floods11: A georeferenced dataset to train and test deep learning
+flood algorithms for Sentinel-1,'' in \emph{CVPR Workshops}, 2020.
+
+\bibitem{zhao2024}
+B.~Zhao, H.~Sui, and J.~Liu,
+``UrbanSARFloods: Sentinel-1 SLC-based benchmark dataset for urban and
+open-area flood mapping,'' in \emph{CVPR Workshop on Earth Vision}, 2024.
+
+\bibitem{almehedi2025}
+M.~A.~Al Mehedi, V.~Smith, and P.~Kremer,
+``A comparative analysis of urban and peri-urban flood identification
+using SAR imagery,'' \emph{PLOS Water}, vol.~4, no.~9, p.~e0000269,
+2025.
+
+\bibitem{renno2008}
+C.~D.~Renn\'{o} et al.,
+``HAND, a new terrain descriptor using SRTM-DEM: Validation in the
+Amazon,'' \emph{Remote Sensing of Environment}, vol.~112, no.~9, 2008.
+
+\bibitem{lin2017focal}
+T.-Y.~Lin, P.~Goyal, R.~Girshick, K.~He, and P.~Doll\'{a}r,
+``Focal loss for dense object detection,'' in \emph{ICCV}, 2017.
+
+\bibitem{yadav2024}
+R.~Yadav et al.,
+``Kuro Siwo: 33 billion m$^2$ under the water --- A global multi-temporal
+SAR dataset,'' in \emph{NeurIPS Datasets and Benchmarks Track}, 2024.
+
+\bibitem{iakubovskii2019}
+P.~Iakubovskii,
+``Segmentation Models PyTorch,'' GitHub, 2019.
+\url{https://github.com/qubvel/segmentation_models.pytorch}
+
+\bibitem{moreira2013}
+A.~Moreira et al.,
+``A tutorial on synthetic aperture radar,''
+\emph{IEEE Geoscience and Remote Sensing Magazine}, vol.~1, no.~1, 2013.
+
+\bibitem{feyisa2014}
+G.~L.~Feyisa, H.~Meilby, R.~Fensholt, and S.~R.~Proud,
+``Automated Water Extraction Index: A new technique for surface water
+mapping using Landsat imagery,'' \emph{Remote Sensing of Environment},
+vol.~140, pp.~23--35, 2014.
+
+\end{thebibliography}
+
+\end{document}

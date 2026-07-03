@@ -1,0 +1,5 @@
+macro_f1: 0.02543
+macro_iou: 0.01317
+macro_precision: 0.33680
+macro_recall: 0.01322
+loss: 0.20068
