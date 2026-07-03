@@ -59,6 +59,11 @@ def parse_args():
     p.add_argument('--pseudo_epochs',   type=int, default=DEFAULTS['pseudo_epochs'])
     p.add_argument('--max_chips',       type=int, default=0,
                    help='>0 caps each split (SMOKE TEST ONLY)')
+    # Throughput levers (see train_with_pseudo.py DEFAULTS for semantics)
+    p.add_argument('--num_workers',   type=int,   default=DEFAULTS['num_workers'])
+    p.add_argument('--test_every',    type=int,   default=DEFAULTS['test_every'])
+    p.add_argument('--amp',           action='store_true')
+    p.add_argument('--cache_eval_gb', type=float, default=DEFAULTS['cache_eval_gb'])
     return p.parse_args()
 
 
@@ -92,6 +97,10 @@ def main():
             finetune_epochs=args.finetune_epochs,
             pseudo_epochs=args.pseudo_epochs,
             max_chips=args.max_chips,
+            num_workers=args.num_workers,
+            test_every=args.test_every,
+            amp=args.amp,
+            cache_eval_gb=args.cache_eval_gb,
         )
         train_main(cfg)
 
