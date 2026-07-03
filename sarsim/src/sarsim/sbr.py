@@ -25,12 +25,12 @@ def simulate_sbr(cfg: SimConfig, scene: 'tracer_ref.TriScene',
     center = np.asarray(cfg.trajectory.target_xyz, np.float64)
     rng = np.random.default_rng(seed) if seed is not None else None
 
-    if backend != 'ref':
-        from . import tracer_mi
-        return tracer_mi.simulate(cfg, scene, n_rays_side, max_depth,
-                                  shadow_rays, seed,
-                                  variant=backend.removeprefix('mi_'),
-                                  progress=progress)
+    if backend.startswith('mi_'):
+        from .tracer_mi import MiTriScene
+        scene = MiTriScene(scene, variant=backend.removeprefix('mi_'))
+    elif backend != 'ref':
+        raise ValueError(f'unknown backend {backend!r}')
+    advance = backend.startswith('mi_')   # fp32 safety: small traced t only
 
     binner = None
     if accumulator == 'binned':
@@ -46,6 +46,8 @@ def simulate_sbr(cfg: SimConfig, scene: 'tracer_ref.TriScene',
     for n, a in it:
         o, d, pw = geometry.scene_grid_rays(a, center, cfg.scene_extent_m,
                                             n_rays_side, jitter_rng=rng)
+        if advance:
+            o, _ = geometry.advanced_origins(o, d, center)
         A, dR, _ = tracer_ref.trace_pulse(scene, a, center, o, d, pw,
                                           max_depth=max_depth,
                                           shadow_rays=shadow_rays)

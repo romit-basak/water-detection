@@ -53,6 +53,12 @@ class TriScene:
         n = np.cross(self.v1 - self.v0, self.v2 - self.v0)
         return n / np.linalg.norm(n, axis=1, keepdims=True)
 
+    def intersect(self, o: np.ndarray, d: np.ndarray):
+        """Backend interface shared with tracer_mi.MiTriScene:
+        (t (N,), n (N,3) geometric normals, mat (N,), hit (N,))."""
+        t, tri, hit = _intersect(self, o, d)
+        return t, self.normals[tri], self.mat_idx[tri], hit
+
 
 def _intersect(scene: TriScene, o: np.ndarray, d: np.ndarray):
     """Vectorized Möller–Trumbore, all rays × all triangles.
@@ -78,21 +84,23 @@ def _intersect(scene: TriScene, o: np.ndarray, d: np.ndarray):
     return tmin, tri, hit
 
 
-def trace_pulse(scene: TriScene, antenna: np.ndarray, center: np.ndarray,
+def trace_pulse(scene, antenna: np.ndarray, center: np.ndarray,
                 rays_o: np.ndarray, rays_d: np.ndarray, ray_power: float,
                 max_depth: int = 3, energy_floor: float = 1e-4,
                 shadow_rays: bool = False):
     """Run the SBR bounce loop for one pulse.
 
+    `scene` is any backend exposing .intersect(o, d) -> (t, n, mat, hit) and
+    .materials (TriScene here; tracer_mi.MiTriScene for Mitsuba/OptiX). All
+    physics stays in this one fp64 numpy implementation. rays_o may be
+    advanced origins; the TRUE antenna position drives return-leg / dR math.
+
     Returns (A (M,), dR (M,), depth (M,)) concatenated over bounces.
-    All math fp64 (reference grade). rays_o may be advanced origins; the true
-    antenna position is passed separately for return-leg / dR computation.
     """
     r_ref = float(np.linalg.norm(center - antenna))
     mats_d = np.array([m.rho_d for m in scene.materials])
     mats_s = np.array([m.rho_s for m in scene.materials])
     mats_p = np.array([m.phong_p for m in scene.materials])
-    normals = scene.normals
 
     A_out, dR_out, dep_out = [], [], []
 
@@ -105,18 +113,18 @@ def trace_pulse(scene: TriScene, antenna: np.ndarray, center: np.ndarray,
     for depth in range(1, max_depth + 1):
         if not alive.any():
             break
-        t, tri, hit = _intersect(scene, o[alive], d[alive])
+        t, n_hit, m_hit, hit = scene.intersect(o[alive], d[alive])
         idx = np.flatnonzero(alive)[hit]
         if idx.size == 0:
             break
-        th, trih = t[hit], tri[hit]
+        th = t[hit]
         p_hit = o[idx] + th[:, None] * d[idx]
-        n = normals[trih]
+        n = n_hit[hit]
         # flip normals toward the incoming ray
         facing = -np.sign(np.einsum('ij,ij->i', d[idx], n))
         n = n * facing[:, None]
         cos_i = np.clip(-np.einsum('ij,ij->i', d[idx], n), 0.0, 1.0)
-        m = scene.mat_idx[trih]
+        m = m_hit[hit]
         # specular reflection of incoming dir + unit vector back to antenna
         r_dir = d[idx] - 2 * np.einsum('ij,ij->i', d[idx], n)[:, None] * n
         s = antenna[None, :] - p_hit
@@ -127,7 +135,7 @@ def trace_pulse(scene: TriScene, antenna: np.ndarray, center: np.ndarray,
 
         if shadow_rays:
             # occlusion test on the return leg hit→antenna
-            t_s, _, hit_s = _intersect(scene, p_hit + 1e-6 * s_hat, s_hat)
+            t_s, _, _, hit_s = scene.intersect(p_hit + 1e-6 * s_hat, s_hat)
             A = np.where(hit_s & (t_s < s_len - 1e-3), 0.0, A)
 
         path_hit = path[idx] + th
