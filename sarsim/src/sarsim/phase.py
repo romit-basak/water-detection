@@ -54,6 +54,49 @@ def accumulate_factored32(f_c: float, delta_f: float, k_idx: np.ndarray,
     return col.astype(np.complex64)
 
 
+class BinnedAccumulator:
+    """O(N + K·N_bins) accumulation for dense scatterer streams.
+
+    Factor S[k] = Σ A·e^{−j4πf_c dR/c} · e^{−j4π(f_k−f_c) dR/c}: the carrier
+    phasor is exact per scatterer (fp64) and scatter-added into fine range
+    bins; only the band term is approximated by bin center. With bin width
+    δr = λ/16 the worst-case band-edge phase error is 2πB·δr/(2c) ≈ 5e−3 rad
+    at B = 150 MHz — negligible. Validated against accumulate_direct in tests.
+    """
+
+    def __init__(self, f_k: np.ndarray, swath_half_m: float,
+                 bin_frac_of_lambda: float = 1 / 16):
+        self.f_k = f_k
+        f_c = float(f_k.mean())
+        lam = C0 / f_c
+        self.dr = lam * bin_frac_of_lambda
+        n_bins = int(np.ceil(2 * swath_half_m / self.dr)) + 2
+        self.r0 = -swath_half_m
+        self.n_bins = n_bins
+        self.a = 4 * np.pi * f_c / C0                       # carrier coef
+        r_bins = self.r0 + (np.arange(n_bins) + 0.5) * self.dr
+        # (K, N_bins) band-term DFT matrix, precomputed once in fp64
+        self.E = np.exp(-4j * np.pi / C0
+                        * np.outer(f_k - f_c, r_bins)).astype(np.complex128)
+
+    def column(self, A: np.ndarray, dR: np.ndarray) -> np.ndarray:
+        """One pulse's stream → (K,) complex column.
+
+        Linear-interpolation binning: the carrier phasor v (exact fp64 phase
+        per scatterer) is split across the two adjacent bins. Only the SLOW
+        band term E[k, b] is thereby interpolated in position — error becomes
+        second-order, (2πB δr / c)²/8 ~ 1e−4 rad even at B = 600 MHz.
+        """
+        h = np.zeros(self.n_bins, dtype=np.complex128)
+        v = A * np.exp(-1j * self.a * dR)
+        x = (dR - self.r0) / self.dr - 0.5          # bin-center coordinates
+        b0 = np.clip(np.floor(x).astype(np.int64), 0, self.n_bins - 2)
+        w = np.clip(x - b0, 0.0, 1.0)
+        np.add.at(h, b0, v * (1 - w))
+        np.add.at(h, b0 + 1, v * w)
+        return self.E @ h
+
+
 def phase_history(f_k: np.ndarray, positions: np.ndarray,
                   phase_center: np.ndarray, targets_xyz: np.ndarray,
                   targets_amp: np.ndarray) -> np.ndarray:

@@ -89,3 +89,17 @@ def test_ambiguity_guards():
                                   n_pulses=64),
             scene_extent_m=100.0,
         ).validate()
+
+
+def test_binned_matches_direct(cfg):
+    """BinnedAccumulator ≈ direct accumulation (λ/16 bins)."""
+    from sarsim.phase import BinnedAccumulator
+    rng = np.random.default_rng(1)
+    A = rng.uniform(0.1, 1.0, 5000)
+    dR = rng.uniform(-12, 12, 5000)
+    f_k = cfg.sarsystem.f_k
+    ref = accumulate_direct(f_k, A, dR)
+    binner = BinnedAccumulator(f_k, swath_half_m=15.0)
+    got = binner.column(A, dR)
+    nrmse = np.linalg.norm(got - ref) / np.linalg.norm(ref)
+    assert nrmse < 1e-3, f'binned NRMSE {nrmse:.2e}'

@@ -54,9 +54,17 @@ def matched_filter(S: np.ndarray, cfg: SimConfig, n_pix: int = 128,
 
 
 def backproject(S: np.ndarray, cfg: SimConfig, n_pix: int | None = None,
-                upsample: int = 32) -> tuple[np.ndarray, np.ndarray]:
+                upsample: int = 32,
+                window: str | None = None) -> tuple[np.ndarray, np.ndarray]:
     # upsample=32: linear-interp amplitude loss is quadratic in bin size;
     # 8x left ~2% peak-amplitude spread (Gate-0 finding), 32x -> ~0.1%.
+    # window='hann': range-spectrum taper (sidelobes −13 dB → −32 dB, IRW
+    # ×1.44) — needed when a bright dihedral line sits 30+ dB over background.
+    if window == 'hann':
+        w = np.hanning(S.shape[0])
+        S = S * (w / w.mean())[:, None]
+    elif window is not None:
+        raise ValueError(f'unknown window {window!r}')
     """Gorham & Moore backprojection. O(Np·(K logK + P))."""
     f_k = cfg.sarsystem.f_k
     f_start = f_k[0]
