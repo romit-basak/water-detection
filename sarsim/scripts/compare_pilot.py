@@ -200,6 +200,13 @@ def main():
                 d['wet'].sum() / max(d['dry'].sum(), 1e-12))
         table[name] = row
 
+    # power images + axis for downstream use (M3 runs in the root env
+    # without mitsuba and can't backproject)
+    np.savez_compressed(out / 'sarsim_bp.npz',
+                        dry=sims['sarsim']['imgs']['dry'],
+                        wet=sims['sarsim']['imgs']['wet'],
+                        axis=sims['sarsim']['y'])
+
     (out / 'metrics_3way.json').write_text(json.dumps(table, indent=2))
     hdr = (f'{"sim":8s} {"strip":>7s} {"open":>7s} {"shadow":>7s} '
            f'{"width":>6s} {"time":>7s}  model')
