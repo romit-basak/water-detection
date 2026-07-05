@@ -25,6 +25,27 @@ import numpy as np
 EPS = 1e-9
 
 
+def hash_noise(p: np.ndarray, seed: int, grain_m: float = 0.5) -> np.ndarray:
+    """Deterministic standard-normal field over positions (corpus D3).
+
+    Quantizes positions to `grain_m`, hashes cell ids with `seed`
+    (splitmix64 finalizer), maps to N(0,1) via Box-Muller. The SAME
+    physical spot yields the SAME draw for every pulse of one acquisition
+    (within-acquisition coherence preserved); a different `seed` gives an
+    independent field (between-acquisition decorrelation)."""
+    q = np.floor(p / grain_m).astype(np.int64).astype(np.uint64)
+    h = (q[:, 0] * np.uint64(0x9E3779B97F4A7C15)
+         ^ q[:, 1] * np.uint64(0xC2B2AE3D27D4EB4F)
+         ^ q[:, 2] * np.uint64(0x165667B19E3779F9)
+         ^ np.uint64(seed))
+    h = (h ^ (h >> np.uint64(30))) * np.uint64(0xBF58476D1CE4E5B9)
+    h = (h ^ (h >> np.uint64(27))) * np.uint64(0x94D049BB133111EB)
+    h = h ^ (h >> np.uint64(31))
+    u1 = ((h >> np.uint64(32)).astype(np.float64) + 1.0) / 4294967297.0
+    u2 = (h & np.uint64(0xFFFFFFFF)).astype(np.float64) / 4294967296.0
+    return np.sqrt(-2.0 * np.log(u1)) * np.cos(2 * np.pi * u2)
+
+
 @dataclass
 class Material:
     rho_d: float = 1.0        # diffuse reflectance
@@ -87,13 +108,21 @@ def _intersect(scene: TriScene, o: np.ndarray, d: np.ndarray):
 def trace_pulse(scene, antenna: np.ndarray, center: np.ndarray,
                 rays_o: np.ndarray, rays_d: np.ndarray, ray_power: float,
                 max_depth: int = 3, energy_floor: float = 1e-4,
-                shadow_rays: bool = False):
+                shadow_rays: bool = False, surface=None):
     """Run the SBR bounce loop for one pulse.
 
     `scene` is any backend exposing .intersect(o, d) -> (t, n, mat, hit) and
     .materials (TriScene here; tracer_mi.MiTriScene for Mitsuba/OptiX). All
     physics stays in this one fp64 numpy implementation. rays_o may be
     advanced origins; the TRUE antenna position drives return-leg / dR math.
+
+    `surface` (optional, corpus acquisition-pair machinery): callable
+    (p_hit (M,3), mat_idx (M,)) -> (gain (M,), sigma_dR_m (M,)). `gain`
+    multiplies the local scattering amplitude AND the specular child energy
+    (dielectric/wetness change); `sigma_dR` scales a position-hashed normal
+    field (`hash_noise(p, surface.acq_seed)`) added to the hit's path —
+    sub-mm range jitter = between-acquisition phase decorrelation. Default
+    None: bitwise-identical to the pre-corpus behavior.
 
     Returns (A (M,), dR (M,), depth (M,)) concatenated over bounces.
     """
@@ -133,12 +162,24 @@ def trace_pulse(scene, antenna: np.ndarray, center: np.ndarray,
         spec = np.clip(np.einsum('ij,ij->i', r_dir, s_hat), 0.0, 1.0)
         A = E[idx] * (mats_d[m] * cos_i + mats_s[m] * spec ** mats_p[m])
 
+        child_gain = None
+        if surface is not None:
+            gain, sigma = surface(p_hit, m)
+            A = A * gain
+            child_gain = gain
+            dpath = hash_noise(p_hit, surface.acq_seed) * sigma
+        else:
+            dpath = 0.0
+
         if shadow_rays:
             # occlusion test on the return leg hit→antenna
             t_s, _, _, hit_s = scene.intersect(p_hit + 1e-6 * s_hat, s_hat)
             A = np.where(hit_s & (t_s < s_len - 1e-3), 0.0, A)
 
-        path_hit = path[idx] + th
+        # surface-height jitter shifts BOTH legs (transmit + return), so
+        # apply 2x here: after the 0.5 monostatic averaging below, dR moves
+        # by exactly sigma*noise (sigma is calibrated as one-way-equivalent)
+        path_hit = path[idx] + th + 2.0 * dpath
         dR = 0.5 * (path_hit + s_len) - r_ref
         keep = A > 0
         A_out.append(A[keep]); dR_out.append(dR[keep])
@@ -147,6 +188,8 @@ def trace_pulse(scene, antenna: np.ndarray, center: np.ndarray,
         # spawn specular children; floor is RELATIVE to per-ray launch power
         # (an absolute floor silently kills all children when N rays >> 1/floor)
         E_child = E[idx] * mats_s[m]
+        if child_gain is not None:
+            E_child = E_child * child_gain
         live = E_child > energy_floor * ray_power
         new_alive = np.zeros(len(o), dtype=bool)
         if depth < max_depth and live.any():

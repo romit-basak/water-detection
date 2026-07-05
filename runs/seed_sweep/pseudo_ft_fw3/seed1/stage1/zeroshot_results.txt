@@ -1,0 +1,8 @@
+macro_f1: 0.49727
+flood_f1: 0.00000
+flood_precision: 0.06250
+flood_recall: 0.00000
+macro_iou: 0.49458
+macro_precision: 0.52583
+macro_recall: 0.50000
+loss: 0.37914

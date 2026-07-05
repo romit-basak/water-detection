@@ -12,7 +12,7 @@
     "open_water_db": 5.400664056753471,
     "shadow_vs_soil_db": -0.22771178270158293,
     "gain_halfwidth_m": 7.447447447447447,
-    "wall_s": 4.030813665999631,
+    "wall_s": 4.03667250000035,
     "signal_model": "stylized intensity (colocated light)"
   },
   "raysar": {
@@ -20,7 +20,7 @@
     "open_water_db": -11.937263037597283,
     "shadow_vs_soil_db": -9.164539485499251,
     "gain_halfwidth_m": 0.24849399993414067,
-    "wall_s": 0.9700219159994958,
+    "wall_s": 0.8717479169999933,
     "signal_model": "ray-contribution histogram layers",
     "double_energy_ratio": 6.594027967116557
   }

@@ -1,0 +1,55 @@
+{
+  "config": {
+    "flood_weight": 10.0,
+    "urban_sar_dir": "data/urban_sar_floods_preprocessed",
+    "finetune_only": true,
+    "n_channels": null,
+    "seed": 0,
+    "val_frac": 0.15,
+    "max_chips": 0
+  },
+  "n_epochs_run": 35,
+  "test_eval_epochs": [
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    10,
+    11,
+    15,
+    17,
+    18,
+    19,
+    20,
+    24,
+    25,
+    26,
+    27,
+    30,
+    35
+  ],
+  "optim": {
+    "amp": true,
+    "test_every": 5,
+    "cache_eval_gb": 30.0,
+    "num_workers": 8
+  },
+  "val_selected": {
+    "epoch": 27,
+    "val_flood_f1": 0.8602832881676239,
+    "test_flood_f1": 0.07758750743302621,
+    "test_macro_f1": 0.4826062000873238,
+    "test_flood_precision": 0.04083270609537003,
+    "test_flood_recall": 0.776896188555488
+  },
+  "peak_over_test": {
+    "test_flood_f1": 0.08474620366821624,
+    "epoch": 24
+  },
+  "final5_mean": {
+    "test_flood_f1": 0.07278819242587133
+  }
+}
