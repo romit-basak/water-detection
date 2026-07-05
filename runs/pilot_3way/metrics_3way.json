@@ -1,0 +1,27 @@
+{
+  "sarsim": {
+    "strip_gain_db": 16.433915320669485,
+    "open_water_db": -8.306314325078768,
+    "shadow_vs_soil_db": -2.123720435758763,
+    "gain_halfwidth_m": 8.050314465408805,
+    "wall_s": 203.0,
+    "signal_model": "phase history (SBR) + backprojection"
+  },
+  "benji": {
+    "strip_gain_db": 5.585547915892072,
+    "open_water_db": 5.400664056753471,
+    "shadow_vs_soil_db": -0.22771178270158293,
+    "gain_halfwidth_m": 7.447447447447447,
+    "wall_s": 4.030813665999631,
+    "signal_model": "stylized intensity (colocated light)"
+  },
+  "raysar": {
+    "strip_gain_db": 5.899664737630863,
+    "open_water_db": -11.937263037597283,
+    "shadow_vs_soil_db": -9.164539485499251,
+    "gain_halfwidth_m": 0.24849399993414067,
+    "wall_s": 0.9700219159994958,
+    "signal_model": "ray-contribution histogram layers",
+    "double_energy_ratio": 6.594027967116557
+  }
+}

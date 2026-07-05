@@ -35,7 +35,10 @@ from __future__ import annotations
 
 import argparse
 import csv
+import json
 import math
+import os
+import random
 import time
 from pathlib import Path
 
@@ -50,6 +53,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from src.data.fast_dataset import (
     FastUrbanSARFloods,
     make_urban_event_split,
+    make_train_val_split,
 )
 from src.data.pseudo_chip_dataset import PseudoChipDataset
 from src.data.transforms import train_transforms, val_transforms
@@ -84,16 +88,44 @@ DEFAULTS = dict(
     num_workers        = 0,
     seed               = 42,
     image_size         = 512,
+    # Leakage-free model selection
+    val_frac           = 0.15,    # chip-level val split carved from the 7 train events
     # Control flags
     skip_pseudo        = False,   # skip Stage 0, load from pseudo_ckpt
     pseudo_ckpt        = '',      # path to Stage 0 checkpoint
     finetune_only      = False,   # ImageNet init baseline, no pseudo pretraining
+    max_chips          = 0,       # >0: cap each split to N chips (SMOKE TEST ONLY)
+    # Throughput levers (defaults preserve original behavior exactly)
+    test_every         = 1,       # eval the TEST set every K epochs (val stays every epoch;
+                                  # test is also forced on new-best-val and the final epoch,
+                                  # so val_selected is unaffected — only peak_over_test /
+                                  # final5_mean become sampled-over-evaluated-epochs)
+    amp                = False,   # bf16 autocast on CUDA (no-op elsewhere)
+    cache_eval_gb      = 0.0,     # >0: replay deterministic val/test batches from RAM,
+                                  # budget in GB (val_transforms is CenterCrop-only)
 )
 
 
 # =============================================================================
 # Utilities (mirrors train_three_stage.py)
 # =============================================================================
+
+def set_seed(seed: int) -> None:
+    """Enumerable, controlled seeding for the multi-seed study.
+
+    Controls init, data-shuffle order, and augmentation sampling so runs are
+    reproducible per-seed and run-to-run variance can be measured across seeds.
+    NOTE: full bitwise determinism is NOT guaranteed on the MPS backend — some
+    ops are nondeterministic or fall back to CPU. The goal here is controlled,
+    enumerable seeds, not bit-exact reproducibility.
+    """
+    os.environ['PYTHONHASHSEED'] = str(seed)
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
 
 def get_device() -> torch.device:
     if torch.cuda.is_available():
@@ -103,7 +135,8 @@ def get_device() -> torch.device:
     return torch.device('cpu')
 
 
-def make_loader(ds, batch_size: int, shuffle: bool, num_workers: int) -> DataLoader:
+def make_loader(ds, batch_size: int, shuffle: bool, num_workers: int,
+                generator: torch.Generator | None = None) -> DataLoader:
     pin    = torch.cuda.is_available()
     mp_ctx = 'spawn' if (num_workers > 0 and not torch.cuda.is_available()) else None
     return DataLoader(
@@ -113,6 +146,7 @@ def make_loader(ds, batch_size: int, shuffle: bool, num_workers: int) -> DataLoa
         prefetch_factor=2 if num_workers > 0 else None,
         multiprocessing_context=mp_ctx,
         drop_last=shuffle,
+        generator=generator if shuffle else None,
     )
 
 
@@ -152,20 +186,66 @@ def build_scheduler(optimizer, warmup: int, total: int):
     return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
 
 
-def run_epoch(model, loader, loss_fn, optimizer, metrics, device, is_train: bool):
+class CachedEvalLoader:
+    """Replays a deterministic eval DataLoader from RAM after the first pass.
+
+    Legal because val_transforms is CenterCrop-only (no randomness): every
+    epoch's eval batches are bit-identical. Images are stored bf16 when AMP is
+    on (matches compute precision) else float32 (exact); masks as int8
+    (labels are -1/0/1 — lossless round-trip to int64). Falls back to plain
+    passthrough if the estimated cache size exceeds the budget.
+    """
+
+    def __init__(self, loader, amp: bool, budget_gb: float, name: str = 'eval'):
+        self.loader  = loader
+        self.batches = None
+        self._img_dtype = torch.bfloat16 if amp else torch.float32
+        ds = loader.dataset
+        est = len(ds) * ds.n_channels * 512 * 512 * self._img_dtype.itemsize \
+            + len(ds) * 512 * 512  # int8 masks
+        self.enabled = budget_gb > 0 and est <= budget_gb * 1e9
+        print(f'[cache_eval:{name}] est={est/1e9:.1f}GB budget={budget_gb:.1f}GB '
+              f'-> {"CACHING" if self.enabled else "passthrough"}')
+
+    def __iter__(self):
+        if not self.enabled:
+            yield from self.loader
+        elif self.batches is None:
+            self.batches = []
+            for batch in self.loader:
+                self.batches.append({
+                    'image': batch['image'].to(self._img_dtype).contiguous(),
+                    'mask':  batch['mask'].to(torch.int8).contiguous(),
+                })
+                yield batch
+        else:
+            for b in self.batches:
+                yield {'image': b['image'].to(torch.float32),
+                       'mask':  b['mask'].to(torch.int64)}
+
+    def __len__(self):
+        return len(self.loader)
+
+
+def run_epoch(model, loader, loss_fn, optimizer, metrics, device, is_train: bool,
+              amp: bool = False):
     model.train(is_train)
     metrics.reset()
     total_loss, n = 0.0, 0
     ctx = torch.enable_grad() if is_train else torch.no_grad()
+    use_amp = amp and device.type == 'cuda'
     with ctx:
         for batch in loader:
-            images  = batch['image'].to(device)
-            masks   = batch['mask'].to(device)
+            images  = batch['image'].to(device, non_blocking=True)
+            masks   = batch['mask'].to(device, non_blocking=True)
             weights = batch.get('weight')
             if weights is not None:
-                weights = weights.to(device)
-            logits = model(images)
-            loss   = loss_fn(logits, masks, weights)
+                weights = weights.to(device, non_blocking=True)
+            # bf16 autocast: no GradScaler needed (bf16 has fp32's exponent
+            # range); log_softmax stays fp32 per autocast policy
+            with torch.autocast('cuda', dtype=torch.bfloat16, enabled=use_amp):
+                logits = model(images)
+                loss   = loss_fn(logits, masks, weights)
             if is_train:
                 optimizer.zero_grad()
                 loss.backward()
@@ -207,6 +287,9 @@ def make_test_loader(cfg: dict) -> DataLoader:
         train_events=FINETUNE_TRAIN_EVENTS,
         test_events=FINETUNE_TEST_EVENTS,
     )
+    cap = cfg.get('max_chips', 0)
+    if cap and cap > 0:
+        test_idx = test_idx[:cap]  # SMOKE TEST ONLY
     ds = FastUrbanSARFloods(
         root=cfg['urban_sar_dir'],
         split_indices=test_idx,
@@ -216,21 +299,45 @@ def make_test_loader(cfg: dict) -> DataLoader:
     return make_loader(ds, cfg['finetune_batch'], False, cfg['num_workers'])
 
 
-def make_train_loader(cfg: dict, augment: bool = True) -> DataLoader:
-    """UrbanSARFloods training split."""
-    train_idx, _ = make_urban_event_split(
+def make_finetune_loaders(cfg: dict):
+    """Build (train, val, test) loaders for Stage 2.
+
+    train/val come from a chip-level split of the 7 event-held-out TRAIN cities
+    (val is used ONLY for leakage-free checkpoint selection). test is the 7
+    held-out TEST cities, used only for reporting — never for selection.
+    """
+    train_idx, test_idx = make_urban_event_split(
         cfg['urban_sar_dir'],
         train_events=FINETUNE_TRAIN_EVENTS,
         test_events=FINETUNE_TEST_EVENTS,
     )
-    ds = FastUrbanSARFloods(
-        root=cfg['urban_sar_dir'],
-        split_indices=train_idx,
-        transform=(train_transforms(cfg['image_size']) if augment
-                   else val_transforms(cfg['image_size'])),
+    tr_idx, val_idx = make_train_val_split(
+        train_idx, val_frac=cfg['val_frac'], seed=cfg['seed'],
     )
-    print(f'Fine-tune train set: {len(ds)} chips')
-    return make_loader(ds, cfg['finetune_batch'], True, cfg['num_workers'])
+
+    # SMOKE-TEST ONLY: cap each split so a 2-epoch run finishes quickly.
+    cap = cfg.get('max_chips', 0)
+    if cap and cap > 0:
+        tr_idx, val_idx, test_idx = tr_idx[:cap], val_idx[:cap], test_idx[:cap]
+        print(f'[max_chips={cap}] SMOKE MODE — splits capped: '
+              f'train={len(tr_idx)} val={len(val_idx)} test={len(test_idx)}')
+
+    train_ds = FastUrbanSARFloods(cfg['urban_sar_dir'], tr_idx,
+                                  transform=train_transforms(cfg['image_size']))
+    val_ds   = FastUrbanSARFloods(cfg['urban_sar_dir'], val_idx,
+                                  transform=val_transforms(cfg['image_size']))
+    test_ds  = FastUrbanSARFloods(cfg['urban_sar_dir'], test_idx,
+                                  transform=val_transforms(cfg['image_size']))
+    print(f'Fine-tune splits: train={len(train_ds)} val={len(val_ds)} '
+          f'test={len(test_ds)} chips')
+
+    g = torch.Generator()
+    g.manual_seed(cfg['seed'])
+    train_loader = make_loader(train_ds, cfg['finetune_batch'], True,
+                               cfg['num_workers'], generator=g)
+    val_loader   = make_loader(val_ds,  cfg['finetune_batch'], False, cfg['num_workers'])
+    test_loader  = make_loader(test_ds, cfg['finetune_batch'], False, cfg['num_workers'])
+    return train_loader, val_loader, test_loader
 
 
 # =============================================================================
@@ -259,13 +366,23 @@ def stage0_pseudo_pretrain(cfg: dict, device: torch.device) -> nn.Module:
     n_ch = pseudo_ds.n_channels
     print(f'Pseudo chips: {len(pseudo_ds)}, n_channels={n_ch}')
 
+    train_ds = pseudo_ds
+    cap = cfg.get('max_chips', 0)
+    if cap and cap > 0:
+        from torch.utils.data import Subset
+        train_ds = Subset(pseudo_ds, list(range(min(cap, len(pseudo_ds)))))
+        print(f'[max_chips={cap}] SMOKE MODE — pseudo train capped to {len(train_ds)} chips')
+
     # Validation: use UrbanSARFloods TEST set for zero-shot monitoring.
     # This is read-only -- these chips never enter the loss.
-    val_loader = make_test_loader(cfg)
+    val_loader = CachedEvalLoader(make_test_loader(cfg), cfg['amp'],
+                                  cfg['cache_eval_gb'], 'stage0-monitor')
 
+    g = torch.Generator()
+    g.manual_seed(cfg['seed'])
     train_loader = make_loader(
-        pseudo_ds, cfg['pseudo_batch'], shuffle=True,
-        num_workers=cfg['num_workers']
+        train_ds, cfg['pseudo_batch'], shuffle=True,
+        num_workers=cfg['num_workers'], generator=g,
     )
 
     model = build_unet(
@@ -293,11 +410,11 @@ def stage0_pseudo_pretrain(cfg: dict, device: torch.device) -> nn.Module:
     for epoch in range(1, cfg['pseudo_epochs'] + 1):
         t0      = time.time()
         train_r = run_epoch(model, train_loader, loss_fn, optimizer,
-                            metrics, device, is_train=True)
+                            metrics, device, is_train=True, amp=cfg['amp'])
         # Monitor on UrbanSARFloods test set (zero-shot -- not used for model selection,
         # just to watch whether pseudo pretraining is helping transfer)
         val_r   = run_epoch(model, val_loader, loss_fn, None,
-                            metrics, device, is_train=False)
+                            metrics, device, is_train=False, amp=cfg['amp'])
         scheduler.step()
         lr = optimizer.param_groups[0]['lr']
 
@@ -347,7 +464,7 @@ def stage1_zeroshot(model: nn.Module, cfg: dict, device: torch.device) -> dict:
     loss_fn    = build_loss(device, flood_weight=cfg['flood_weight'])
     metrics    = SegmentationMetrics(n_classes=N_CLASSES, ignore_index=IGNORE_INDEX)
     results    = run_epoch(model, val_loader, loss_fn, None,
-                           metrics, device, is_train=False)
+                           metrics, device, is_train=False, amp=cfg['amp'])
 
     print(f'Zero-shot flood F1  = {results["flood_f1"]:.4f}')
     print(f'Zero-shot macro F1  = {results["macro_f1"]:.4f}')
@@ -377,8 +494,10 @@ def stage2_finetune(model: nn.Module, cfg: dict, device: torch.device) -> nn.Mod
     print(f'Test:  {FINETUNE_TEST_EVENTS}')
     print('='*60)
 
-    train_loader = make_train_loader(cfg, augment=True)
-    test_loader  = make_test_loader(cfg)
+    train_loader, val_loader, test_loader = make_finetune_loaders(cfg)
+    # Deterministic eval -> replay from RAM after first pass (see CachedEvalLoader)
+    val_loader  = CachedEvalLoader(val_loader,  cfg['amp'], cfg['cache_eval_gb'], 'val')
+    test_loader = CachedEvalLoader(test_loader, cfg['amp'], cfg['cache_eval_gb'], 'test')
 
     # Discriminative LR: encoder 5x lower than decoder
     # Preserves pseudo-pretrained encoder features while decoder adapts quickly
@@ -395,56 +514,131 @@ def stage2_finetune(model: nn.Module, cfg: dict, device: torch.device) -> nn.Mod
     loss_fn   = build_loss(device, flood_weight=cfg['flood_weight'])
     metrics   = SegmentationMetrics(n_classes=N_CLASSES, ignore_index=IGNORE_INDEX)
 
-    fields = ['epoch', 'train_loss', 'test_flood_f1', 'test_macro_f1',
-              'test_precision', 'test_recall']
+    # Log every epoch's VAL selection metric AND the full TEST metrics so all
+    # three point estimates can be recomputed from the CSV if needed.
+    fields = ['epoch', 'train_loss', 'val_flood_f1',
+              'test_flood_f1', 'test_flood_precision', 'test_flood_recall',
+              'test_macro_f1']
     with open(out / 'log.csv', 'w', newline='') as f:
         csv.DictWriter(f, fieldnames=fields).writeheader()
 
-    best_f1    = 0.0
-    patience   = 8
-    no_improve = 0
+    # Per-epoch history for the three point estimates:
+    #   peak_over_test  = max test F1 over EVALUATED epochs (LEAKY — old protocol;
+    #                     sampled every test_every epochs + best-val + final)
+    #   val_selected    = test F1 at the best-VAL epoch     (LEAKAGE-FREE, exact:
+    #                     test is force-evaluated on every new-best-val epoch)
+    #   final5_mean     = mean test F1 over last <=5 evaluated epochs
+    test_hist    = {}          # epoch -> test flood F1 (evaluated epochs only)
+    best_val_f1  = -1.0
+    val_sel      = {}          # snapshot of test metrics at the best-val epoch
+    patience     = 8
+    no_improve   = 0           # early stopping is on VAL, never on test
+    amp          = cfg['amp']
+    last_epoch   = 0
 
     for epoch in range(1, cfg['finetune_epochs'] + 1):
+        last_epoch = epoch
         t0      = time.time()
         train_r = run_epoch(model, train_loader, loss_fn, optimizer,
-                            metrics, device, is_train=True)
-        test_r  = run_epoch(model, test_loader,  loss_fn, None,
-                            metrics, device, is_train=False)
+                            metrics, device, is_train=True, amp=amp)
+        val_r   = run_epoch(model, val_loader,  loss_fn, None,
+                            metrics, device, is_train=False, amp=amp)
+        new_best = val_r['flood_f1'] > best_val_f1
+
+        need_test = (epoch % cfg['test_every'] == 0) or new_best \
+                    or (epoch == cfg['finetune_epochs'])
+        test_r = None
+        if need_test:
+            test_r = run_epoch(model, test_loader, loss_fn, None,
+                               metrics, device, is_train=False, amp=amp)
+            test_hist[epoch] = test_r['flood_f1']
         scheduler.step()
         lr = optimizer.param_groups[0]['lr']
 
-        # Extract precision/recall if available in metrics
-        prec = test_r.get('flood_precision', float('nan'))
-        rec  = test_r.get('flood_recall',    float('nan'))
-
+        t_f1  = f'{test_r["flood_f1"]:.4f}' if test_r else '  --  '
         print(f'S2 {epoch:3d}/{cfg["finetune_epochs"]} | '
               f'loss={train_r["loss"]:.4f} | '
-              f'flood_F1={test_r["flood_f1"]:.4f} | '
-              f'P={prec:.3f} R={rec:.3f} | '
+              f'val_F1={val_r["flood_f1"]:.4f} | test_F1={t_f1} | '
               f'lr={lr:.2e} | {time.time()-t0:.0f}s')
 
         write_log(out / 'log.csv', fields, {
-            'epoch':          epoch,
-            'train_loss':     round(train_r['loss'], 5),
-            'test_flood_f1':  round(test_r['flood_f1'], 5),
-            'test_macro_f1':  round(test_r['macro_f1'], 5),
-            'test_precision': round(prec, 5) if not np.isnan(prec) else '',
-            'test_recall':    round(rec, 5) if not np.isnan(rec) else '',
+            'epoch':                epoch,
+            'train_loss':           round(train_r['loss'], 5),
+            'val_flood_f1':         round(val_r['flood_f1'], 5),
+            'test_flood_f1':        round(test_r['flood_f1'], 5) if test_r else '',
+            'test_flood_precision': round(test_r['flood_precision'], 5) if test_r else '',
+            'test_flood_recall':    round(test_r['flood_recall'], 5) if test_r else '',
+            'test_macro_f1':        round(test_r['macro_f1'], 5) if test_r else '',
         })
 
-        if test_r['flood_f1'] > best_f1:
-            best_f1    = test_r['flood_f1']
-            no_improve = 0
-            save_ckpt(out / 'best.pt', model, optimizer, epoch, best_f1, cfg)
-            print(f'  -> New best flood F1={best_f1:.4f}')
+        # LEAKAGE-FREE selection: pick checkpoint by VAL F1, record its TEST F1
+        # (test_r is guaranteed evaluated on new-best epochs).
+        if new_best:
+            best_val_f1 = val_r['flood_f1']
+            no_improve  = 0
+            val_sel = {
+                'epoch':           epoch,
+                'val_flood_f1':    val_r['flood_f1'],
+                'test_flood_f1':   test_r['flood_f1'],
+                'test_macro_f1':   test_r['macro_f1'],
+                'test_flood_precision': test_r['flood_precision'],
+                'test_flood_recall':    test_r['flood_recall'],
+            }
+            save_ckpt(out / 'best.pt', model, optimizer, epoch,
+                      test_r['flood_f1'], cfg)
+            print(f'  -> New best VAL F1={best_val_f1:.4f} '
+                  f'(test F1 here = {test_r["flood_f1"]:.4f})')
         else:
             no_improve += 1
             if no_improve >= patience:
-                print(f'  Early stopping at epoch {epoch}')
+                print(f'  Early stopping (val) at epoch {epoch}')
                 break
 
-    print(f'\nStage 2 done. Best flood F1={best_f1:.4f}')
-    print(f'v9_aux baseline (no pseudo): 0.1504')
+    # Ensure the stopping epoch has a test evaluation (weights are unchanged
+    # since that epoch, so this is exact).
+    if last_epoch and last_epoch not in test_hist:
+        test_r = run_epoch(model, test_loader, loss_fn, None,
+                           metrics, device, is_train=False, amp=amp)
+        test_hist[last_epoch] = test_r['flood_f1']
+
+    # ── Three point estimates (over evaluated epochs) ────────────────────────
+    eval_epochs    = sorted(test_hist)
+    f1s            = [test_hist[e] for e in eval_epochs]
+    peak_over_test = max(f1s) if f1s else float('nan')
+    peak_epoch     = eval_epochs[int(np.argmax(f1s))] if f1s else -1
+    final5_mean    = float(np.mean(f1s[-5:])) if f1s else float('nan')
+
+    summary = {
+        'config': {
+            'flood_weight':  cfg['flood_weight'],
+            'urban_sar_dir': cfg['urban_sar_dir'],
+            'finetune_only': cfg['finetune_only'],
+            'n_channels':    int(model.n_channels) if hasattr(model, 'n_channels') else None,
+            'seed':          cfg['seed'],
+            'val_frac':      cfg['val_frac'],
+            'max_chips':     cfg.get('max_chips', 0),
+        },
+        'n_epochs_run':   last_epoch,
+        'test_eval_epochs': eval_epochs,
+        'optim': {'amp': cfg['amp'], 'test_every': cfg['test_every'],
+                  'cache_eval_gb': cfg['cache_eval_gb'],
+                  'num_workers': cfg['num_workers']},
+        # LEAKAGE-FREE (val-selected)
+        'val_selected':   val_sel,
+        # LEAKY (matches old report's "peak flood F1"; sampled epochs when test_every>1)
+        'peak_over_test': {'test_flood_f1': peak_over_test, 'epoch': peak_epoch},
+        # Robustness check (last <=5 evaluated epochs)
+        'final5_mean':    {'test_flood_f1': final5_mean},
+    }
+    with open(out / 'summary.json', 'w') as f:
+        json.dump(summary, f, indent=2)
+
+    print(f'\nStage 2 done.')
+    print(f'  val-selected test F1 = {val_sel.get("test_flood_f1", float("nan")):.4f} '
+          f'(epoch {val_sel.get("epoch", -1)})  [LEAKAGE-FREE]')
+    print(f'  peak-over-test  F1   = {peak_over_test:.4f} (epoch {peak_epoch})  [LEAKY]')
+    print(f'  final-5 mean    F1   = {final5_mean:.4f}')
+    print(f'  v9_aux report baseline (peak, leaky): 0.1504')
     return model
 
 
@@ -479,8 +673,15 @@ def stage3_eval(model: nn.Module, cfg: dict, device: torch.device):
 
 def main(cfg: dict):
     Path(cfg['out_dir']).mkdir(parents=True, exist_ok=True)
+    set_seed(cfg['seed'])
     device = get_device()
+    if device.type == 'cuda':
+        # Fixed 512x512 input -> autotuned conv kernels. Kernel choice may be
+        # nondeterministic across runs; across-seed SD is our noise measure.
+        torch.backends.cudnn.benchmark = True
     print(f'Device: {device}')
+    print(f'Seed: {cfg["seed"]} | amp={cfg["amp"]} | test_every={cfg["test_every"]} '
+          f'| cache_eval_gb={cfg["cache_eval_gb"]}')
     print(f'Config: out_dir={cfg["out_dir"]}, flood_weight={cfg["flood_weight"]}, '
           f'pseudo_epochs={cfg["pseudo_epochs"]}, finetune_epochs={cfg["finetune_epochs"]}')
 

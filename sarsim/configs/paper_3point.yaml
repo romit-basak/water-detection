@@ -1,0 +1,25 @@
+# Gate-0 validation config — the 3-point-target experiment of Willis et al.
+# 2020 §5.3.2 (duplicating Gorham & Moore): 10 GHz center, 600 MHz bandwidth,
+# K=512 frequencies, Np=128 pulses, circular spotlight, 30° depression,
+# 10 km slant range, 3° aperture, 10x10 m scene @ 2 cm pixels.
+# Target positions are ours (paper does not tabulate them).
+name: paper_3point
+sarsystem:
+  carrier_ghz: 10.0
+  bandwidth_mhz: 600.0
+  n_freq: 512
+  polarity: HH
+trajectory:
+  mode: circular_spotlight
+  slant_range_m: 10000.0
+  depression_deg: 30.0
+  az_start_deg: 48.5      # 3° aperture centered on 50° azimuth
+  az_end_deg: 51.5
+  n_pulses: 128
+  target_xyz: [0.0, 0.0, 0.0]
+scene_extent_m: 10.0
+pixel_m: 0.02
+targets:                   # sarsim-specific: point scatterers for Stage 0
+  - [0.0, 0.0, 0.0]
+  - [-2.0, -2.0, 0.0]
+  - [3.0, 1.0, 0.0]
